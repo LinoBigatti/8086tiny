@@ -22,7 +22,10 @@
 
 #endif
 
-#include <bios.h>
+#ifdef GODOT_SUPPORT
+	#include <bios.h>
+	#include <ibm_ega_9x14.h>
+#endif
 
 // Emulator system constants
 #define IO_PORT_COUNT 0x10000
@@ -185,7 +188,7 @@ struct timeb ms_clock;
 
 #ifdef GODOT_SUPPORT
 	void *gd8086;
-	unsigned char *framebuffer[FB_X * FB_Y * 3];
+	unsigned int framebuffer[FB_X * FB_Y];
 	unsigned short vid_addr_lookup[VIDEO_RAM_SIZE], cga_colors[4] = {0 /* Black */, 0x1F1F /* Cyan */, 0xE3E3 /* Magenta */, 0xFFFF /* White */};
 #else
 	int disk[3];
@@ -277,7 +280,7 @@ int AAA_AAS(char which_operation) {
 	extern unsigned int gd8086_readdisk(void *gd8086, int disk_id, unsigned short offset, unsigned char *dst, unsigned short count);
 	extern unsigned int gd8086_writedisk(void *gd8086, int disk_id, unsigned short offset, unsigned char *src, unsigned short count);
 
-	extern void gd8086_sync_framebuffer(void *gd8086, unsigned char *framebuffer);
+	extern void gd8086_sync_framebuffer(void *gd8086, unsigned int *framebuffer);
 
 	void audio_callback(void *data, unsigned char *stream, int len) {
 		// TODO: Port to godot
@@ -343,18 +346,22 @@ void process_graphics() {
 
 	} else {
 		// Render text
+		// Loop over all chars
 		for (int y = 0; y < CONSOLE_HEIGHT; y++) {
 			for (int x = 0; x < CONSOLE_WIDTH; x++) {
 				char ch = vid_mem_base[160 * y + 2 * x];
-
-				if (ch != " ") {
-					for (int i = 0; i < 14; i++)
-						for (int j = 0; j < 9; j++)
-							framebuffer[(j * 14 + i) * 3] = 255;
+				
+				// Loop over rows of char
+				for (int _y = 0; _y < 14; _y++) {
+					const unsigned short row = ibm_ega_9x14_data[ch * 14 + _y];
+					unsigned int *row_start = framebuffer + (y * 14 * FB_X) + _y * FB_X + (x * 9) ;
+					
+					// Loop over bits of row
+					for (int _x = 0; _x < 9; _x++)
+						row_start[_x] = ((row >> (15 - _x)) & 1) ? 0xFFFFFFFF : 0xFF000000;
 				}
 			}
 		}
-		
 	}
 	
 	gd8086_sync_framebuffer(gd8086, framebuffer);
