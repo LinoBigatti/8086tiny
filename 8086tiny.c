@@ -163,7 +163,7 @@
 
 #ifdef GODOT_SUPPORT
 	//TODO: Port to godot
-	#define GFX_KEYBOARD_DRIVER 1/* mem[0x4A6] = 0x0, pc_interrupt(7) */
+	#define GFX_KEYBOARD_DRIVER pc_interrupt(7)
 	
 	#define FB_X 720
 	#define FB_Y 350
@@ -853,7 +853,7 @@ int t8086_tick() {
 	// If a timer tick is pending, interrupts are enabled, and no overrides/REP are active,
 	// then process the tick and check for new keystrokes
 	if (int8_asap && !seg_override_en && !rep_override_en && regs8[FLAG_IF] && !regs8[FLAG_TF])
-		pc_interrupt(0xA), int8_asap = 0, GFX_KEYBOARD_DRIVER;
+		pc_interrupt(0xA), int8_asap = 0;//, GFX_KEYBOARD_DRIVER;
 
 	return reg_ip;
 }

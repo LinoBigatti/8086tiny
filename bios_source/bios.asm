@@ -14,38 +14,9 @@
 %define GODOT_SUPPORT
 ;%define ANSI_SUPPORT
 
-%ifdef GODOT_SUPPORT
-%macro extended_putchar_al 0
-	db	0x0f, 0x00
-
-	push bx
-	push ds
-	push ax
-
-	mov	bx, 0xB000			; load 0xB000 (video memory start) into bx
-	mov	ds, bx				; copy bx into ds
-
-	mov	bx, 160				; load 160 into bx
-	mov	ax, 0				; load 0 into ax
-	mov	al, [es:curpos_y-bios_data]	; load cursor y into al (ax lower bits)
-	mul	bx				; multiply ax with bx and store into ax
-
-	mov	bx, 0				; load 0 into bx
-	mov	bl, [es:curpos_x-bios_data]	; load cursor x into bl
-	shl	bx, 1				; shift bx left (multiply by 2)
-	add	ax, bx				; bx = 160 * y + 2 * x
-
-	pop	ax
-	mov	[bx], ax			; move ax into ds:bx
-
-	pop	ds
-	pop	bx
-%endmacro
-%else
 %macro	extended_putchar_al 0
 	db	0x0f, 0x00
 %endmacro
-%endif
 
 %macro	extended_get_rtc 0
 	db	0x0f, 0x01
@@ -1059,10 +1030,12 @@ int10:
 	je	int10_scrolldown
 	cmp	ah, 0x08 ; Get character at cursor
 	je	int10_charatcur
-	cmp	ah, 0x09 ; Write char and attribute
+	cmp	ah, 0x09 ; Write char and attribute at cursor position
 	je	int10_write_char_attrib
-	cmp	ah, 0x0e ; Write character at cursor position
+	cmp	ah, 0x0A ; Write char only at cursor position
 	je	int10_write_char
+	cmp	ah, 0x0e ; Write single char at cursor position
+	je	int10_teletype_char
 	cmp	ah, 0x0f ; Get video mode
 	je	int10_get_vm
 	; cmp	ah, 0x1a ; Feature check
@@ -1251,7 +1224,9 @@ int10:
 	
     skip_set_cur_col_max:
 
-	call set_cursor_pos
+%ifdef ANSI_SUPPORT
+	call ansi_set_cursor_pos
+%endif
 
 	cmp	byte [cursor_visible-bios_data], 1
 	jne 	skip_set_cur
@@ -1278,11 +1253,18 @@ int10:
 
 	iret
 
-  int10_scrollup:
+; Scroll up a window
+; al = number of lines to scroll up by
+; bh = attribute for blank lines
+; ch,cl = row,col of upper left corner of window to scroll
+; dh,dl = row,col of lower right corner of window to scroll
+int10_scrollup:
 	
-	jmp scroll_up
+%ifdef ANSI_SUPPORT
+	jmp ansi_scroll_up
+%endif
 
-int10_scroll_up_vmem_update:
+  int10_scroll_up_vmem_update:
 
 	; Now, we need to update video memory
 
@@ -1343,7 +1325,7 @@ int10_scroll_up_vmem_update:
 	cmp	ch, dh
 	jae	cls_vmem_scroll_up_one_done
 
-vmem_scroll_up_copy_next_row:
+    vmem_scroll_up_copy_next_row:
 
 	push	cx
 	mov	cx, ax		; CX is now the length (in words) of the row to copy
@@ -1378,12 +1360,23 @@ vmem_scroll_up_copy_next_row:
 	pop	ax
 	pop	bx
 
+	sub	ah, 0x06		; Check if requested interrupt is scroll_up or if we are just being called 
+	jnz	_newline_done		; If we are just being called, jump to a ret instruction (here on _newline_done)
+
 	iret
 	
-  int10_scrolldown:
-	jmp scroll_down
+; Scroll down a window
+; al = number of lines to scroll down by
+; bh = attribute for blank lines
+; ch,cl = row,col of upper left corner of window to scroll
+; dh,dl = row,col of lower right corner of window to scroll
+int10_scrolldown:
 
-int10_scroll_down_vmem_update:
+%ifdef ANSI_SUPPORT
+	jmp ansi_scroll_down
+%endif
+
+  int10_scroll_down_vmem_update:
 
 	; Now, we need to update video memory
 
@@ -1479,11 +1472,6 @@ int10_scroll_down_vmem_update:
 
   int10_charatcur:
 
-	; This returns the character at the cursor. It is completely dysfunctional,
-	; and only works at all if the character has previously been written following
-	; an int 10/ah = 2 call to set the cursor position. Added just to support
-	; GWBASIC.
-
 	push	ds
 	push	es
 	push	bx
@@ -1520,19 +1508,108 @@ int10_scroll_down_vmem_update:
 
 	iret
 
-  int10_write_char:
-
-	; First write the character to a buffer at C000:0. This is so that
-	; we can later retrieve it using the get character at cursor function,
-	; which GWBASIC uses.
+; Display a single character on the screen, advancing the cursor and scrolling the screen as necessary.
+; al = character to write
+; bl = foreground color (unimplemented, graphics mode only)
+int10_teletype_char:
 
 	push	ds
 	push	es
 	push	cx
 	push	dx
 	push	ax
-	push	bp
 	push	bx
+%ifdef ANSI_SUPPORT
+	push	bp
+%endif
+
+	extended_putchar_al
+
+%ifdef GODOT_SUPPORT
+	; Godot mode uses video memory for characters, like a real Hercules/CGA card.
+
+	push ax
+
+	mov	bx, 0xB000			; load 0xB000 (video memory start) into bx
+	mov	ds, bx				; copy bx into ds
+
+	mov	bx, 160				; load 160 into bx
+	mov	ax, 0				; load 0 into ax
+	mov	al, [es:curpos_y-bios_data]	; load cursor y into al (ax lower bits)
+	mul	bx				; multiply ax with bx and store into ax
+
+	mov	bx, 0				; load 0 into bx
+	mov	bl, [es:curpos_x-bios_data]	; load cursor x into bl
+	shl	bx, 1				; shift bx left (multiply by 2)
+	add	bx, ax				; bx = 160 * y + 2 * x
+
+	pop	ax
+
+	mov	ah, 7				; set attribute byte
+	mov	[bx], ax			; move ax into ds:bx
+%endif
+
+	jmp int10_handle_special_chars
+
+; Display a single character on the screen, possible multiple times
+; al = character to write
+; bl = foreground color (unimplemented, graphics mode only)
+; cx = times to print character
+int10_write_char:
+
+	push	ds
+	push	es
+	push	cx
+	push	dx
+	push	ax
+	push	bx
+%ifdef ANSI_SUPPORT
+	push	bp
+%endif
+
+	extended_putchar_al
+
+%ifdef GODOT_SUPPORT 
+	; Godot mode uses video memory for characters, like a real Hercules/CGA card.
+
+	push ax
+
+	mov	bx, 0xB000			; load 0xB000 (video memory start) into bx
+	mov	ds, bx				; copy bx into ds
+
+	mov	bx, 160				; load 160 into bx
+	mov	ax, 0				; load 0 into ax
+	mov	al, [es:curpos_y-bios_data]	; load cursor y into al (ax lower bits)
+	mul	bx				; multiply ax with bx and store into ax
+
+	mov	bx, 0				; load 0 into bx
+	mov	bl, [es:curpos_x-bios_data]	; load cursor x into bl
+	shl	bx, 1				; shift bx left (multiply by 2)
+	add	bx, ax				; bx = 160 * y + 2 * x
+
+	pop	ax
+
+  write_char_inner_loop:
+	extended_putchar_al
+
+	mov	ah, 7				; set attribute byte
+	mov	[bx], ax			; move ax into ds:bx
+	
+	inc	bx 
+
+	inc     byte [es:curpos_x-bios_data]
+	inc     byte [es:crt_curpos_x-bios_data]
+
+	dec	cx
+	jnz	write_char_inner_loop
+
+	; We decrement these because the code expects it to not be 1 spot ahead alreadyV
+	dec	byte [es:curpos_x-bios_data]
+	dec     byte [es:crt_curpos_x-bios_data]
+%elif ANSI_SUPPORT
+	; First write the character to a buffer at C000:0. This is so that
+	; we can later retrieve it using the get character at cursor function,
+	; which GWBASIC uses.
 
 	push	ax
 
@@ -1558,25 +1635,69 @@ int10_scroll_down_vmem_update:
 	mov	[bx], cx
 	
 	pop	ax
-	push	ax
+%endif
 
-	extended_putchar_al
+	jmp	int10_handle_special_chars
 
-	jmp	int10_write_char_skip_lines
-
-  int10_write_char_attrib:
-
-	; First write the character to a buffer at C000:0. This is so that
-	; we can later retrieve it using the get character at cursor function,
-	; which GWBASIC uses.
+; Display a single character on the screen, with some set attributes, possible multiple times
+; al = character to write
+; bl = attributes
+; cx = times to print character
+int10_write_char_attrib:
 
 	push	ds
 	push	es
 	push	cx
 	push	dx
 	push	ax
-	push	bp
 	push	bx
+%ifdef ANSI_SUPPORT
+	push	bp
+%endif
+
+%ifdef GODOT_SUPPORT
+	; Godot mode uses video memory for characters, like a real Hercules/CGA card.
+
+	mov	dx, bx				; copy the contents of bx to dx, to use bx as a pointer
+
+	push	ax
+
+	mov	bx, 0xB000			; load 0xB000 (video memory start) into bx
+	mov	ds, bx				; copy bx into ds
+
+	mov	bx, 160				; load 160 into bx
+	mov	ax, 0				; load 0 into ax
+	mov	al, [es:curpos_y-bios_data]	; load cursor y into al (ax lower bits)
+	mul	bx				; multiply ax with bx and store into ax
+
+	mov	bx, 0				; load 0 into bx
+	mov	bl, [es:curpos_x-bios_data]	; load cursor x into bl
+	shl	bx, 1				; shift bx left (multiply by 2)
+	add	bx, ax				; bx = 160 * y + 2 * x
+
+	pop	ax
+
+  write_attrib_inner_loop:
+	extended_putchar_al
+
+	mov	ah, dl				; set attribute byte
+	mov	[bx], ax			; move ax into ds:bx
+	
+	inc	bx
+
+	inc     byte [es:curpos_x-bios_data]
+	inc     byte [es:crt_curpos_x-bios_data]
+
+	dec	cx
+	jnz	write_attrib_inner_loop
+
+	; We decrement these because the code expects it to not be 1 spot ahead alreadyV
+	dec	byte [es:curpos_x-bios_data]
+	dec     byte [es:crt_curpos_x-bios_data]
+%elif ANSI_SUPPORT
+	; First write the character to a buffer at C000:0. This is so that
+	; we can later retrieve it using the get character at cursor function,
+	; which GWBASIC uses.
 
 	push	ax
 	push	cx
@@ -1652,15 +1773,15 @@ cpu	8086
 	
 	pop	cx
 	pop	ax
-	push	ax
 
-    out_another_char:
-
+    write_attrib_inner_loop:
 	extended_putchar_al
-	dec	cx
-	cmp	cx, 0
-	jne	out_another_char
 
+	dec	cx
+	jnz	write_attrib_inner_loop
+
+	push ax
+	
 	mov	al, 0x1B	; Escape
 	extended_putchar_al
 	mov	al, '['		; ANSI
@@ -1670,70 +1791,104 @@ cpu	8086
 	mov	al, 'm'
 	extended_putchar_al
 
-    int10_write_char_skip_lines:
-
 	pop	ax
+%endif
 
-	push	es
-	pop	ds
+    int10_handle_special_chars:
+	cmp	al, 0x08	; Is backspace?
+	jne	int10_write_char_inc_x
 
-	cmp	al, 0x08
-	jne	int10_write_char_attrib_inc_x
+	dec	byte [es:curpos_x-bios_data]
+	dec	byte [es:crt_curpos_x-bios_data]
+	cmp	byte [es:curpos_x-bios_data], 0
+	jg	int10_write_char_done
 
-	dec	byte [curpos_x-bios_data]
-	dec	byte [crt_curpos_x-bios_data]
-	cmp	byte [curpos_x-bios_data], 0
-	jg	int10_write_char_attrib_done
+	mov	byte [es:curpos_x-bios_data], 0
+	mov	byte [es:crt_curpos_x-bios_data], 0
+	jmp	int10_write_char_done
 
-	mov	byte [curpos_x-bios_data], 0
-	mov	byte [crt_curpos_x-bios_data], 0
-	jmp	int10_write_char_attrib_done
-
-    int10_write_char_attrib_inc_x:
+    int10_write_char_inc_x:
+	jmp int10_write_char_not_cr
 
 	cmp	al, 0x0A	; New line?
-	je	int10_write_char_attrib_newline
+	je	int10_write_char_newline
+
+	cmp	al, 0x0C	; Form feed?
+	je	int10_write_char_formfeed
 
 	cmp	al, 0x0D	; Carriage return?
-	jne	int10_write_char_attrib_not_cr
+	jne	int10_write_char_not_cr
 
-	mov	byte [curpos_x-bios_data], 0
-	mov	byte [crt_curpos_x-bios_data], 0
-	jmp	int10_write_char_attrib_done
+	mov	byte [es:curpos_x-bios_data], 0
+	mov	byte [es:crt_curpos_x-bios_data], 0
+	jmp	int10_write_char_done
 
-    int10_write_char_attrib_not_cr:
+    int10_write_char_formfeed:
+	; TODO: Find out actual behaviour in this case
+	;call clear_screen
+	call _int10_write_char_newline
+	call _int10_write_char_newline
 
-	inc	byte [curpos_x-bios_data]
-	inc	byte [crt_curpos_x-bios_data]
-	cmp	byte [curpos_x-bios_data], 80
-	jge	int10_write_char_attrib_newline
-	jmp	int10_write_char_attrib_done
+	jmp int10_write_char_done
 
-    int10_write_char_attrib_newline:
+    int10_write_char_not_cr:
 
-	mov	byte [curpos_x-bios_data], 0
-	mov	byte [crt_curpos_x-bios_data], 0
-	inc	byte [curpos_y-bios_data]
-	inc	byte [crt_curpos_y-bios_data]
+	inc	byte [es:curpos_x-bios_data]
+	inc	byte [es:crt_curpos_x-bios_data]
+	cmp	byte [es:curpos_x-bios_data], 80
+	jb	int10_write_char_done
 
-	cmp	byte [curpos_y-bios_data], 25
-	jb	int10_write_char_attrib_done
-	mov	byte [curpos_y-bios_data], 24
-	mov	byte [crt_curpos_y-bios_data], 24
+	jmp	int10_write_char_newline
 
-	mov	bh, 7
-	mov	al, 1
-	mov	cx, 0
-	mov	dx, 0x184f
+    _int10_write_char_newline:
+	mov	byte [es:curpos_x-bios_data], 0
+	mov	byte [es:crt_curpos_x-bios_data], 0
+	inc	byte [es:curpos_y-bios_data]
+	inc	byte [es:crt_curpos_y-bios_data]
+
+	cmp	byte [es:curpos_y-bios_data], 25
+	jb	_newline_done
+	mov	byte [es:curpos_y-bios_data], 24
+	mov	byte [es:crt_curpos_y-bios_data], 24
+
+	push	ax
+	push	bx
+	push	cx
+	push	dx
+
+	mov	bh, 7		; attribute for blank lines
+	mov	al, 1		; number of lines to scroll up by
+	mov	cx, 0		; row,col of upper left corner of window to scroll (packed as 2 bytes)
+	mov	dx, 0x184f	; row,col of lower right corner of window to scroll (packed as 2 bytes)
 
 	pushf
-	push	cs
+
 	call	int10_scroll_up_vmem_update
 
-    int10_write_char_attrib_done:
-
+	pop	dx
+	pop	cx
 	pop	bx
+	pop	ax
+
+    _newline_done:
+
+	ret
+
+    _jge_int10_write_char_newline:
+
+	jge _int10_write_char_newline
+	ret
+    
+    int10_write_char_newline:
+    
+	call _int10_write_char_newline
+
+    int10_write_char_done:
+
+%ifdef ANSI_SUPPORT
 	pop	bp
+%endif 
+	pop	bx
 	pop	ax
 	pop	dx
 	pop	cx
@@ -3202,7 +3357,7 @@ vmem_done:
 
 ; Sets cursor position to (x: dh, y: dl)
 
-set_cursor_pos:
+ansi_set_cursor_pos:
 	push ax
 
 	mov	al, 0x1B	; ANSI
@@ -3225,9 +3380,7 @@ set_cursor_pos:
 	ret
 
 ; Clear screen. Also clear video memory with attribute in BH
-
 clear_screen:
-
 	push	ax
 
 	mov	al, 0x1B	; Escape
@@ -3380,7 +3533,7 @@ hide_cursor:
 
 ; Scroll up using ANSI codes 
 
-scroll_up:
+ansi_scroll_up:
 
 	push	bx
 	push	cx
@@ -3649,12 +3802,44 @@ scroll_down:
 
 %else
 
-set_cursor_pos:
-
-	ret
-
+; Clear video memory with attribute in bh
 clear_screen:
-	
+	push	ax
+	push	bx
+	push	cx
+	push	ds
+
+	mov	byte [es:curpos_x-bios_data], 0		; clear cursor position
+	mov	byte [es:crt_curpos_x-bios_data], 0
+	mov	byte [es:curpos_y-bios_data], 0
+	mov	byte [es:crt_curpos_y-bios_data], 0
+
+	mov	ax, 0xB000				; load 0xB000 (video memory start) into ax
+	mov	ds, ax					; copy ax into ds
+
+	mov	ax, bx					; copy bx into ax
+
+	mov	cx, 80*25
+	mov	bx, 0
+
+clear_screen_inner:
+	; the first byte is the char, so we clear it
+	mov	byte [bx], 0
+	inc	bx
+
+	; the second byte is the attribute, so we copy it from al
+	mov	[bx], al
+	inc	bx
+
+	; decrement cx and loop if its not zero
+	dec	cx
+	jnz clear_screen_inner
+
+	pop	ds
+	pop	cx
+	pop	bx
+	pop	ax
+
 	ret
 
 show_cursor:
@@ -3662,10 +3847,6 @@ show_cursor:
 	ret
 
 hide_cursor:
-	
-	ret
-
-scroll_up:
 	
 	ret
 
