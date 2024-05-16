@@ -387,8 +387,8 @@ int7:	; Whenever the user presses a key, INT 7 is called by the emulator.
 
 	mov	byte [cs:last_key_sdl], 0
 
-	test	ah, 4 ; This key doesn't come from SDL
-	jz	check_linux_bksp
+	test	ah, 0x8			; Check byte 4 of ah
+	jz	check_linux_bksp	; If zero, the input comes from linux
 
 	mov	byte [es:keyflags1-bios_data], 0
 	mov	byte [es:keyflags2-bios_data], 0
@@ -551,7 +551,6 @@ int7:	; Whenever the user presses a key, INT 7 is called by the emulator.
 		
   sdl_not_in_buf:
 
-	mov	al, bh
 	call	io_key_available
 	jmp	i2_dne	
 
@@ -1825,9 +1824,9 @@ cpu	8086
 
     int10_write_char_formfeed:
 	; TODO: Find out actual behaviour in this case
-	;call clear_screen
-	call _int10_write_char_newline
-	call _int10_write_char_newline
+	call clear_screen
+	;call _int10_write_char_newline
+	;call _int10_write_char_newline
 
 	jmp int10_write_char_done
 
@@ -3804,41 +3803,47 @@ scroll_down:
 
 ; Clear video memory with attribute in bh
 clear_screen:
-	push	ax
-	push	bx
-	push	cx
-	push	ds
 
-	mov	byte [es:curpos_x-bios_data], 0		; clear cursor position
+	; clear cursor position
+	mov	byte [es:curpos_x-bios_data], 0
 	mov	byte [es:crt_curpos_x-bios_data], 0
 	mov	byte [es:curpos_y-bios_data], 0
 	mov	byte [es:crt_curpos_y-bios_data], 0
 
-	mov	ax, 0xB000				; load 0xB000 (video memory start) into ax
-	mov	ds, ax					; copy ax into ds
+	push	es
+	push	di
+	push	cx
 
-	mov	ax, bx					; copy bx into ax
+	cld			; clear direction bit
+	mov	ax, 0xb800	; transfer to 0xb800
+	mov	es, ax
+	mov	di, 0		; start from 0
+	mov	al, 0		; write a 0 in the lower byte
+	mov	ah, bh		; write bh in the higher byte
+	mov	cx, 80*25	; set 80*25 words
+	rep	stosw		; execute transfer 
 
+	cld
+	mov	di, 0xc800
+	mov	es, di
+	mov	di, 0
 	mov	cx, 80*25
-	mov	bx, 0
+	rep	stosw
 
-clear_screen_inner:
-	; the first byte is the char, so we clear it
-	mov	byte [bx], 0
-	inc	bx
+	cld
+	mov	di, 0xc000
+	mov	es, di
+	mov	di, 0
+	mov	cx, 80*25
+	rep	stosw
 
-	; the second byte is the attribute, so we copy it from al
-	mov	[bx], al
-	inc	bx
-
-	; decrement cx and loop if its not zero
-	dec	cx
-	jnz clear_screen_inner
-
-	pop	ds
 	pop	cx
-	pop	bx
+	pop	di
+	pop	es
+
 	pop	ax
+
+	mov	byte [cs:vram_dirty], 1
 
 	ret
 

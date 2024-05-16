@@ -37,7 +37,7 @@
 #ifndef GRAPHICS_UPDATE_DELAY
 #define GRAPHICS_UPDATE_DELAY 360000
 #endif
-#define KEYBOARD_TIMER_UPDATE_DELAY 20000
+#define KEYBOARD_TIMER_UPDATE_DELAY 360000
 
 // 16-bit register decodes
 #define REG_AX 0
@@ -162,8 +162,7 @@
 #else
 
 #ifdef GODOT_SUPPORT
-	//TODO: Port to godot
-	#define GFX_KEYBOARD_DRIVER pc_interrupt(7)
+	#define GFX_KEYBOARD_DRIVER (io_ports[0x60] = gd8086_getchar(gd8086)) && (int8_asap = (io_ports[0x60] == 0x1B),  pc_interrupt(9))
 	
 	#define FB_X 720
 	#define FB_Y 350
@@ -276,6 +275,7 @@ int AAA_AAS(char which_operation) {
 
 #ifdef GODOT_SUPPORT
 	extern void gd8086_putchar(unsigned char c);
+	extern char gd8086_getchar();
 
 	extern unsigned int gd8086_readdisk(void *gd8086, int disk_id, unsigned short offset, unsigned char *dst, unsigned short count);
 	extern unsigned int gd8086_writedisk(void *gd8086, int disk_id, unsigned short offset, unsigned char *src, unsigned short count);
@@ -298,6 +298,7 @@ int AAA_AAS(char which_operation) {
 
 #endif
 
+#include <stdio.h>
 int t8086_init(int boot_from_hdd, unsigned short *disk_sizes, void *p_gd8086) {
 #ifdef GODOT_SUPPORT
 	gd8086 = p_gd8086;
@@ -402,11 +403,14 @@ void process_graphics() {
 }
 
 int t8086_tick() {
+	int old_reg_ip = reg_ip;
+	int old_reg_cs = 16 * regs16[REG_CS];
+
 	// Instruction execution loop. Terminates if CS:IP = 0:0
 	opcode_stream = mem + 16 * regs16[REG_CS] + reg_ip;
 
 	if (opcode_stream == mem) {
-		return 1;
+		return -1;
 	}
 
 	// Set up variables to prepare for decoding an opcode
@@ -776,7 +780,6 @@ int t8086_tick() {
 		OPCODE 47: // TEST AL/AX, immed
 			R_M_OP(regs8[REG_AL], &, i_data0)
 		OPCODE 48: // Emulator-specific 0F xx opcodes
-			   // TODO: Port to godot
 			switch ((char)i_data0)
 			{
 #ifdef GODOT_SUPPORT
@@ -853,14 +856,18 @@ int t8086_tick() {
 	// If a timer tick is pending, interrupts are enabled, and no overrides/REP are active,
 	// then process the tick and check for new keystrokes
 	if (int8_asap && !seg_override_en && !rep_override_en && regs8[FLAG_IF] && !regs8[FLAG_TF])
-		pc_interrupt(0xA), int8_asap = 0;//, GFX_KEYBOARD_DRIVER;
+		pc_interrupt(0xA), int8_asap = 0, GFX_KEYBOARD_DRIVER;
+
+	if (16 * regs16[REG_CS] + reg_ip == 0) {
+		printf("Machine stopped because of execution at 0:0. Old reg_ip: %#04X. Old reg_cs: %#04X\n", old_reg_ip, old_reg_cs);
+	}
 
 	return reg_ip;
 }
 
 int t8086_loop() {
 	while (1) {
-		if (t8086_tick() != 0) {
+		if (t8086_tick() == -1) {
 			break;
 		}
 	}
